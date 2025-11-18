@@ -388,6 +388,8 @@ set ( filters_files
       obsfunctions/RecordNumberToObsSpace.h
       obsfunctions/ModelLevelIndex.cc
       obsfunctions/ModelLevelIndex.h
+      obsfunctions/SigmaFromInnovations.cc
+      obsfunctions/SigmaFromInnovations.h
 )
 
 if( ${gsw_FOUND} )
@@ -412,3 +414,6 @@ set ( filters_src_files
       ${_p_filters_files}
       PARENT_SCOPE
 )
+
+
+
