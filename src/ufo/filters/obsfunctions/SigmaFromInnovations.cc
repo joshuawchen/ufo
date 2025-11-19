@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "eckit/config/LocalConfiguration.h"
@@ -23,32 +24,36 @@ static ObsFunctionMaker<SigmaFromInnovations> makerSigmaFromInnovations_(
 // -----------------------------------------------------------------------------
 
 SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration & conf)
-  : obsGroup_("ObsValue"),
+  : options_(),
+    obsGroup_("ObsValue"),
     hofxGroup_("HofX"),
     eMode_(0.0),
-    invars_()
+    grid_(),
+    variance_(),
+    requiredVars_()
 {
   oops::Log::trace() << "SigmaFromInnovations constructor" << std::endl;
   oops::Log::debug() << "SigmaFromInnovations config = " << conf << std::endl;
 
-  // Optional groups
-  conf.get("obs group",  obsGroup_);
-  conf.get("hofx group", hofxGroup_);
+  // Parse YAML options into options_
+  options_.deserialize(conf);
 
-  // Required scalar: innovation_mode
-  conf.get("innovation_mode", eMode_);
+  // Copy convenient values
+  obsGroup_ = options_.obsGroup.value();
+  hofxGroup_ = options_.hofxGroup.value();
+  eMode_     = options_.innovationMode.value();
+  grid_      = options_.innovationGrid.value();
+  variance_  = options_.varianceTable.value();
 
-  // Required arrays: innovation_grid and variance_table
-  conf.get("innovation_grid", grid_);
-  conf.get("variance_table", variance_);
-
+  // Basic checks
   if (grid_.empty() || variance_.empty() || grid_.size() != variance_.size()) {
     throw eckit::UserError(
       "SigmaFromInnovations: innovation_grid and variance_table must be non-empty "
-      "and of equal length", Here());
+      "and have the same length.",
+      Here());
   }
 
-  // Ensure innovation_grid is strictly increasing
+  // innovation_grid must be strictly increasing
   for (size_t i = 1; i < grid_.size(); ++i) {
     if (!(grid_[i] > grid_[i - 1])) {
       std::ostringstream oss;
@@ -59,26 +64,30 @@ SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration & con
     }
   }
 
-  // Ensure variances are non-negative
+  // variances must be non-negative
   for (double & v : variance_) {
     if (v < 0.0) {
       throw eckit::UserError(
-        "SigmaFromInnovations: variance_table entries must be >= 0", Here());
+        "SigmaFromInnovations: variance_table entries must be >= 0.", Here());
     }
   }
 
-  // We deliberately leave invars_ empty: we will pull ObsValue/HofX on demand
+  // We *could* list required variables here, but since the variable name
+  // is not known until compute() (filter variables), we leave this empty.
+  // We will explicitly call in.get(Variable(...)) inside compute().
 }
 
 // -----------------------------------------------------------------------------
 
 double SigmaFromInnovations::varianceFromCenteredInnovation(double r) const {
+  // clamp + linear interpolation in sigma^2, as requested
+
   const size_t n = grid_.size();
   if (n == 1) {
     return variance_[0];
   }
 
-  // Clamp to endpoints (no extrapolation)
+  // Clamp to endpoints: use min/max sigma^2 outside grid range
   if (r <= grid_.front()) {
     return variance_.front();
   }
@@ -93,10 +102,10 @@ double SigmaFromInnovations::varianceFromCenteredInnovation(double r) const {
 
   const double x0 = grid_[i];
   const double x1 = grid_[j];
-  const double y0 = variance_[i];
-  const double y1 = variance_[j];
+  const double y0 = variance_[i];  // sigma^2 at x0
+  const double y1 = variance_[j];  // sigma^2 at x1
 
-  const double t = (r - x0) / (x1 - x0);
+  const double t = (r - x0) / (x1 - x0);  // 0 <= t <= 1
   return (1.0 - t) * y0 + t * y1;
 }
 
@@ -106,9 +115,55 @@ void SigmaFromInnovations::compute(const ObsFilterData & in,
                                    ioda::ObsDataVector<float> & out) const {
   oops::Log::trace() << "SigmaFromInnovations compute start" << std::endl;
 
-  const size_t nlocs = in.nlocs();
+  const size_t nlocs  = in.nlocs();
   const float missing = util::missingValue<float>();
 
-  // We expect exactly one output variable for this ObsFunction instance
+  // One output variable per ObsFunction instance
   ASSERT(out.nvars() == 1);
   const std::string varName = out.varnames()[0];  // e.g. "airTemperature"
+
+  // Read y and H(x) for this variable
+  std::vector<float> y, hofx;
+  in.get(Variable(obsGroup_ + "/"  + varName), y);
+  in.get(Variable(hofxGroup_ + "/" + varName), hofx);
+
+  if (y.size() != nlocs || hofx.size() != nlocs) {
+    throw eckit::UserError(
+      "SigmaFromInnovations: size mismatch between ObsValue/HofX and nlocs.",
+      Here());
+  }
+
+  // Compute sigma(e) for each location
+  for (size_t j = 0; j < nlocs; ++j) {
+    if (y[j] == missing || hofx[j] == missing) {
+      out[0][j] = missing;
+      continue;
+    }
+
+    const double e = static_cast<double>(y[j]) - static_cast<double>(hofx[j]);  // innovation
+    const double r = e - eMode_;  // centered innovation, relative to noise mode
+
+    double var = varianceFromCenteredInnovation(r);
+    if (var < 0.0) {
+      // Guard against tiny negatives from interpolation / roundoff
+      var = 0.0;
+    }
+
+    out[0][j] = (var > 0.0) ? static_cast<float>(std::sqrt(var))
+                            : 0.0f;
+  }
+
+  oops::Log::trace() << "SigmaFromInnovations compute complete" << std::endl;
+}
+
+// -----------------------------------------------------------------------------
+
+const ufo::Variables & SigmaFromInnovations::requiredVariables() const {
+  // We are using ObsFilterData::get with explicit Variable(group/name),
+  // so we don't need to register variables here.
+  return requiredVars_;
+}
+
+// -----------------------------------------------------------------------------
+
+}  // namespace ufo
