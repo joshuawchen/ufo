@@ -6,8 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "eckit/config/LocalConfiguration.h"
-
 #include "ioda/ObsDataVector.h"
 #include "oops/util/Logger.h"
 #include "oops/util/missingValues.h"
@@ -72,9 +70,8 @@ SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration & con
     }
   }
 
-  // We *could* list required variables here, but since the variable name
-  // is not known until compute() (filter variables), we leave this empty.
-  // We will explicitly call in.get(Variable(...)) inside compute().
+  // We’re reading ObsValue/HofX directly in compute(), so we leave
+  // requiredVars_ empty.
 }
 
 // -----------------------------------------------------------------------------
