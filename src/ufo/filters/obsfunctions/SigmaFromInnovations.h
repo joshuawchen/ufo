@@ -1,59 +1,92 @@
-#pragma once
+#ifndef UFO_FILTERS_OBSFUNCTIONS_SIGMAFROMINNOVATIONS_H_
+#define UFO_FILTERS_OBSFUNCTIONS_SIGMAFROMINNOVATIONS_H_
 
 #include <string>
 #include <vector>
 
-#include "eckit/config/LocalConfiguration.h"
+#include "oops/util/parameters/Parameter.h"
+#include "oops/util/parameters/Parameters.h"
 
-#include "ufo/filters/ObsFunctionBase.h"
+#include "ufo/filters/obsfunctions/ObsFunctionBase.h"
 #include "ufo/filters/Variables.h"
 
 namespace ufo {
 
-/// ObsFunction that returns a Gaussian sigma as a function of innovation.
+/// Options for SigmaFromInnovations ObsFunction.
 ///
 /// YAML example:
-///   obs function:
-///     name: SigmaFromInnovations
+///   test variables:
+///   - name: ObsFunction/SigmaFromInnovations
 ///     options:
-///       innovation_mode: 0.0            # e_mode, mode of true noise
-///       innovation_grid: [ -4, -2, 0, 2, 4 ]   # grid in *innovation* space
-///       variance_table:  [ ... same length ... ]
-///       obs group:  ObsValue            # optional
-///       hofx group: HofX                # optional
+///       innovation_mode: 0.0
+///       innovation_grid:   [-5.0, -4.0, ..., 4.0, 5.0]
+///       variance_table:    [ ... same length as innovation_grid ... ]
+///       obs group:         "ObsValue"   # optional
+///       hofx group:        "HofX"       # optional
+class SigmaFromInnovationsParameters : public oops::Parameters {
+  OOPS_CONCRETE_PARAMETERS(SigmaFromInnovationsParameters, Parameters)
+
+ public:
+  /// Mode of the true noise in innovation units (e_mode).
+  oops::Parameter<double> innovationMode{
+    "innovation_mode", 0.0, this};
+
+  /// Grid values r_i (will be used on centered innovations r = e - e_mode).
+  oops::Parameter<std::vector<double>> innovationGrid{
+    "innovation_grid", {}, this};
+
+  /// sigma^2(r_i) values, same length as innovationGrid.
+  oops::Parameter<std::vector<double>> varianceTable{
+    "variance_table", {}, this};
+
+  /// Group name for observations (usually "ObsValue").
+  oops::Parameter<std::string> obsGroup{
+    "obs group", "ObsValue", this};
+
+  /// Group name for HofX (background/analysis equivalent).
+  oops::Parameter<std::string> hofxGroup{
+    "hofx group", "HofX", this};
+};
+
+/// \brief ObsFunction that returns a Gaussian sigma as a function of innovation.
 ///
-/// For each obs & variable:
-///   e = y - H(x)
-///   r = e - innovation_mode
-///   sigma^2(r) obtained by clamped linear interpolation in variance_table
-///   output = sqrt( sigma^2(r) )
+/// For each observation j:
+///   e_j = y_j - Hx_j
+///   r_j = e_j - innovation_mode
+///   sigma^2(r_j) is obtained by clamped linear interpolation in variance_table
+///   output_j = sqrt( sigma^2(r_j) )
 ///
-/// Outside the grid range, we **clamp** to the nearest endpoint
-/// (no extrapolation, just use min/max variance).
+/// Outside the grid range we **clamp** to the nearest end (no extrapolation).
 class SigmaFromInnovations : public ObsFunctionBase<float> {
  public:
+  static const std::string classname() { return "SigmaFromInnovations"; }
+
   explicit SigmaFromInnovations(const eckit::LocalConfiguration &);
+  ~SigmaFromInnovations() override = default;
 
   void compute(const ObsFilterData &,
                ioda::ObsDataVector<float> &) const override;
 
-  /// We will re-read ObsValue/HofX ourselves; nothing extra is required.
   const ufo::Variables & requiredVariables() const override;
 
  private:
-  // Options
-  std::string obsGroup_;    ///< Group name for observations (default "ObsValue")
-  std::string hofxGroup_;   ///< Group name for HofX (default "HofX")
-  double eMode_;            ///< innovation_mode (true noise mode)
+  // Parsed options
+  SigmaFromInnovationsParameters options_;
 
-  // Lookup tables; we store them **centered** internally.
-  std::vector<double> grid_;      ///< centered innovation grid r_i = e_i - eMode_
-  std::vector<double> variance_;  ///< variance_table: sigma^2(r_i)
+  // Convenience copies
+  std::string obsGroup_;
+  std::string hofxGroup_;
+  double eMode_;
+  std::vector<double> grid_;
+  std::vector<double> variance_;
 
-  ufo::Variables requiredVars_;   ///< left empty
+  // No explicit required variables: we read ObsValue/HofX on demand.
+  ufo::Variables requiredVars_;
 
-  /// Linear interpolation in sigma^2 with clamping at endpoints.
+  /// Interpolate sigma^2(r) with clamping at the endpoints.
   double varianceFromCenteredInnovation(double r) const;
 };
 
 }  // namespace ufo
+
+#endif  // UFO_FILTERS_OBSFUNCTIONS_SIGMAFROMINNOVATIONS_H_
