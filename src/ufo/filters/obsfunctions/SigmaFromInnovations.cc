@@ -2,87 +2,83 @@
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
+#include <sstream>
+#include <vector>
 
-#include "eckit/exception/Exceptions.h"
+#include "eckit/config/LocalConfiguration.h"
 
 #include "ioda/ObsDataVector.h"
+#include "oops/util/Logger.h"
+#include "oops/util/missingValues.h"
+
 #include "ufo/filters/ObsFilterData.h"
-#include "ufo/filters/ObsFunctionMaker.h"
+#include "ufo/filters/Variable.h"
 
 namespace ufo {
 
-// Registration: this string is what you put under "name:" in YAML.
-static ObsFunctionMaker<SigmaFromInnovations> makerSigmaFromInnovations(
+// Register with the ObsFunction factory
+static ObsFunctionMaker<SigmaFromInnovations> makerSigmaFromInnovations_(
     "SigmaFromInnovations");
 
 // -----------------------------------------------------------------------------
-// Constructor: parse options, center & sort the grid
-// -----------------------------------------------------------------------------
 
-SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration &conf)
-  : obsGroup_("ObsValue"), hofxGroup_("HofX"), eMode_(0.0), requiredVars_() {
-  // Optional group names
-  conf.getIfExists("obs group",  obsGroup_);
-  conf.getIfExists("hofx group", hofxGroup_);
+SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration & conf)
+  : obsGroup_("ObsValue"),
+    hofxGroup_("HofX"),
+    eMode_(0.0),
+    invars_()
+{
+  oops::Log::trace() << "SigmaFromInnovations constructor" << std::endl;
+  oops::Log::debug() << "SigmaFromInnovations config = " << conf << std::endl;
 
-  // Required: innovation_mode, innovation_grid, variance_table
-  if (!conf.has("innovation_mode")) {
-    throw eckit::BadValue("SigmaFromInnovations: 'innovation_mode' option is required", Here());
-  }
+  // Optional groups
+  conf.get("obs group",  obsGroup_);
+  conf.get("hofx group", hofxGroup_);
+
+  // Required scalar: innovation_mode
   conf.get("innovation_mode", eMode_);
 
-  if (!conf.has("innovation_grid") || !conf.has("variance_table")) {
-    throw eckit::BadValue("SigmaFromInnovations: 'innovation_grid' and 'variance_table' "
-                          "options are required", Here());
+  // Required arrays: innovation_grid and variance_table
+  conf.get("innovation_grid", grid_);
+  conf.get("variance_table", variance_);
+
+  if (grid_.empty() || variance_.empty() || grid_.size() != variance_.size()) {
+    throw eckit::UserError(
+      "SigmaFromInnovations: innovation_grid and variance_table must be non-empty "
+      "and of equal length", Here());
   }
 
-  std::vector<double> rawGrid;
-  std::vector<double> rawVar;
-  conf.get("innovation_grid", rawGrid);
-  conf.get("variance_table", rawVar);
-
-  if (rawGrid.empty()) {
-    throw eckit::BadValue("SigmaFromInnovations: innovation_grid cannot be empty", Here());
-  }
-  if (rawGrid.size() != rawVar.size()) {
-    throw eckit::BadValue("SigmaFromInnovations: innovation_grid and variance_table "
-                          "must have the same length", Here());
+  // Ensure innovation_grid is strictly increasing
+  for (size_t i = 1; i < grid_.size(); ++i) {
+    if (!(grid_[i] > grid_[i - 1])) {
+      std::ostringstream oss;
+      oss << "SigmaFromInnovations: innovation_grid must be strictly increasing; "
+          << "grid[" << i-1 << "]=" << grid_[i-1]
+          << ", grid[" << i   << "]=" << grid_[i];
+      throw eckit::UserError(oss.str(), Here());
+    }
   }
 
-  // Center the grid around innovation_mode and sort by r
-  std::vector<std::pair<double, double>> pairs;
-  pairs.reserve(rawGrid.size());
-  for (std::size_t i = 0; i < rawGrid.size(); ++i) {
-    const double r = rawGrid[i] - eMode_;  // centered innovation coordinate
-    pairs.emplace_back(r, rawVar[i]);
+  // Ensure variances are non-negative
+  for (double & v : variance_) {
+    if (v < 0.0) {
+      throw eckit::UserError(
+        "SigmaFromInnovations: variance_table entries must be >= 0", Here());
+    }
   }
 
-  std::sort(pairs.begin(), pairs.end(),
-            [](const std::pair<double, double> &a,
-               const std::pair<double, double> &b) {
-              return a.first < b.first;
-            });
-
-  grid_.resize(pairs.size());
-  variance_.resize(pairs.size());
-  for (std::size_t i = 0; i < pairs.size(); ++i) {
-    grid_[i]     = pairs[i].first;
-    variance_[i] = pairs[i].second;
-  }
+  // We deliberately leave invars_ empty: we will pull ObsValue/HofX on demand
 }
 
 // -----------------------------------------------------------------------------
-// Interpolation: sigma^2(r) with **clamping** at endpoints
-// -----------------------------------------------------------------------------
 
-double SigmaFromInnovations::varianceFromCenteredInnovation(const double r) const {
-  // Single point: constant variance.
-  if (grid_.size() == 1) {
+double SigmaFromInnovations::varianceFromCenteredInnovation(double r) const {
+  const size_t n = grid_.size();
+  if (n == 1) {
     return variance_[0];
   }
 
-  // Clamp to ends (no extrapolation).
+  // Clamp to endpoints (no extrapolation)
   if (r <= grid_.front()) {
     return variance_.front();
   }
@@ -90,53 +86,29 @@ double SigmaFromInnovations::varianceFromCenteredInnovation(const double r) cons
     return variance_.back();
   }
 
-  // Find first grid point strictly greater than r.
-  auto it = std::upper_bound(grid_.begin(), grid_.end(), r);
-  const std::size_t idx = static_cast<std::size_t>(std::distance(grid_.begin(), it));
+  // Find first grid point > r
+  auto upper = std::upper_bound(grid_.begin(), grid_.end(), r);
+  const size_t j = static_cast<size_t>(upper - grid_.begin());
+  const size_t i = j - 1;
 
-  const double x0 = grid_[idx - 1];
-  const double x1 = grid_[idx];
-  const double v0 = variance_[idx - 1];
-  const double v1 = variance_[idx];
+  const double x0 = grid_[i];
+  const double x1 = grid_[j];
+  const double y0 = variance_[i];
+  const double y1 = variance_[j];
 
   const double t = (r - x0) / (x1 - x0);
-  return (1.0 - t) * v0 + t * v1;
+  return (1.0 - t) * y0 + t * y1;
 }
 
 // -----------------------------------------------------------------------------
-// Compute: sigma(e) for every obs/variable
-// -----------------------------------------------------------------------------
 
-void SigmaFromInnovations::compute(const ObsFilterData &data,
-                                   ioda::ObsDataVector<float> &out) const {
-  const std::size_t nlocs = data.nlocs();
-  const std::size_t nvars = out.nvars();
+void SigmaFromInnovations::compute(const ObsFilterData & in,
+                                   ioda::ObsDataVector<float> & out) const {
+  oops::Log::trace() << "SigmaFromInnovations compute start" << std::endl;
 
-  // Read obs and HofX from requested groups for the *same* variables as "out".
-  ioda::ObsDataVector<float> y(data.obsspace(), out.varnames(), obsGroup_);
-  ioda::ObsDataVector<float> h(data.obsspace(), out.varnames(), hofxGroup_);
+  const size_t nlocs = in.nlocs();
+  const float missing = util::missingValue<float>();
 
-  for (std::size_t jvar = 0; jvar < nvars; ++jvar) {
-    for (std::size_t jl = 0; jl < nlocs; ++jl) {
-      const double e = static_cast<double>(y[jvar][jl]) -
-                       static_cast<double>(h[jvar][jl]);
-      const double r = e - eMode_;  // centered innovation
-
-      double var = varianceFromCenteredInnovation(r);
-      if (var < 0.0) var = 0.0;  // safety
-      out[jvar][jl] = static_cast<float>(std::sqrt(var));
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------
-// requiredVariables
-// -----------------------------------------------------------------------------
-
-const ufo::Variables & SigmaFromInnovations::requiredVariables() const {
-  // We are reading ObsValue/HofX directly via ObsDataVector, so nothing special
-  // needs to be pre-fetched by the filter framework.
-  return requiredVars_;
-}
-
-}  // namespace ufo
+  // We expect exactly one output variable for this ObsFunction instance
+  ASSERT(out.nvars() == 1);
+  const std::string varName = out.varnames()[0];  // e.g. "airTemperature"
