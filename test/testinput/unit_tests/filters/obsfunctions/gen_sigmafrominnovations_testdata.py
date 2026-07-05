@@ -8,6 +8,8 @@
 # Run at build time by CMake. Deterministic (fixed seed) so the test is
 # reproducible; regenerates against whatever IODA/HDF5 is present so it can't
 # rot. An independent oracle computes the expected sigma -> TestReference.
+# The YAML runs the operator TWO ways (variable inferred from the output slot,
+# and variable given explicitly), both checked against the same oracle.
 import os, math
 from datetime import datetime, timezone
 import numpy as np
@@ -99,13 +101,11 @@ except Exception:
     write_h5py()
 
 def L(xs): return "[" + ", ".join("%.6g" % x for x in xs) + "]"
-yaml = f"""time window:
-  begin: 2020-01-01T00:00:00Z
-  end:   2020-01-01T06:00:00Z
 
-observations:
-- obs space:
-    name: SigmaFromInnovationsTest
+def obs_block(name, with_variable):
+    var_line = f"\n      variable: {VAR}" if with_variable else ""
+    return f"""- obs space:
+    name: {name}
     obsdatain:
       engine:
         type: H5File
@@ -115,12 +115,20 @@ observations:
     name: ObsFunction/SigmaFromInnovations
     options:
       obs group: ObsValue
-      hofx group: HofX
+      hofx group: HofX{var_line}
       innovation_mode: {mode:.6g}
       innovation_grid: {L(grid)}
       variance_table: {L(variance)}
     variables: [{VAR}]
-    tolerance: 1.0e-4
+    tolerance: 1.0e-4"""
+
+yaml = f"""time window:
+  begin: 2020-01-01T00:00:00Z
+  end:   2020-01-01T06:00:00Z
+
+observations:
+{obs_block("SigmaFromInnovations_infer", False)}
+{obs_block("SigmaFromInnovations_explicit", True)}
 """
 open(OUT_YAML, "w").write(yaml)
 print("wrote", OUT_NC, "and", OUT_YAML)

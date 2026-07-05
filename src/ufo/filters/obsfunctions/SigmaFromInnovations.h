@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "oops/util/parameters/OptionalParameter.h"
 #include "oops/util/parameters/Parameter.h"
 #include "oops/util/parameters/Parameters.h"
 
@@ -21,8 +22,9 @@ namespace ufo {
 ///       innovation_mode: 0.0
 ///       innovation_grid:   [-5.0, -4.0, ..., 4.0, 5.0]
 ///       variance_table:    [ ... same length as innovation_grid ... ]
-///       obs group:         "ObsValue"   # optional
-///       hofx group:        "HofX"       # optional
+///       obs group:         "ObsValue"       # optional
+///       hofx group:        "HofX"           # optional
+///       variable:          "airTemperature" # optional; see note below
 class SigmaFromInnovationsParameters : public oops::Parameters {
   OOPS_CONCRETE_PARAMETERS(SigmaFromInnovationsParameters, Parameters)
 
@@ -46,6 +48,16 @@ class SigmaFromInnovationsParameters : public oops::Parameters {
   /// Group name for HofX (background/analysis equivalent).
   oops::Parameter<std::string> hofxGroup{
     "hofx group", "HofX", this};
+
+  /// Optional name of the observed variable this function targets.
+  ///
+  /// If set, requiredVariables() declares <obs group>/<variable> and
+  /// <hofx group>/<variable>, so the framework knows this function depends on
+  /// H(x) and schedules it after the obs operator (the post stage) on its own.
+  /// If left unset, the target variable is inferred from the output variable at
+  /// compute() time, in which case the filter must use 'defer to post: true'.
+  oops::OptionalParameter<std::string> variable{
+    "variable", this};
 };
 
 /// \brief ObsFunction that returns a Gaussian sigma as a function of innovation.
@@ -80,7 +92,13 @@ class SigmaFromInnovations : public ObsFunctionBase<float> {
   std::vector<double> grid_;
   std::vector<double> variance_;
 
-  // No explicit required variables: we read ObsValue/HofX on demand.
+  // Explicit target variable (empty if not provided; then inferred from output).
+  std::string variable_;
+
+  // Required variables. Populated with <obs group>/<var> and <hofx group>/<var>
+  // only when the optional 'variable' is set, which lets the framework schedule
+  // this function after H(x) automatically. Otherwise left empty and the
+  // function relies on 'defer to post: true' for correct scheduling.
   ufo::Variables requiredVars_;
 
   /// Interpolate sigma^2(r) with clamping at the endpoints.

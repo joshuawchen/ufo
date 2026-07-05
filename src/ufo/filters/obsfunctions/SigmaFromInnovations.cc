@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <boost/optional.hpp>
+
 #include "ioda/ObsDataVector.h"
 #include "oops/util/Logger.h"
 #include "oops/util/missingValues.h"
@@ -28,6 +30,7 @@ SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration & con
     eMode_(0.0),
     grid_(),
     variance_(),
+    variable_(),
     requiredVars_()
 {
   oops::Log::trace() << "SigmaFromInnovations constructor" << std::endl;
@@ -70,8 +73,16 @@ SigmaFromInnovations::SigmaFromInnovations(const eckit::LocalConfiguration & con
     }
   }
 
-  // We’re reading ObsValue/HofX directly in compute(), so we leave
-  // requiredVars_ empty.
+  // Optional explicit target variable. When provided, declare <obs group>/<var>
+  // and <hofx group>/<var> as required inputs, so the framework knows this
+  // function depends on H(x) and schedules it in the post stage automatically.
+  // When omitted, requiredVars_ stays empty and the target variable is taken
+  // from the output variable in compute() ('defer to post: true' is then needed).
+  if (options_.variable.value() != boost::none) {
+    variable_ = *options_.variable.value();
+    requiredVars_ += Variable(obsGroup_  + "/" + variable_);
+    requiredVars_ += Variable(hofxGroup_ + "/" + variable_);
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -117,7 +128,8 @@ void SigmaFromInnovations::compute(const ObsFilterData & in,
 
   // One output variable per ObsFunction instance
   ASSERT(out.nvars() == 1);
-  const std::string varName = out.varnames()[0];  // e.g. "airTemperature"
+  // Target variable: explicit 'variable' option if given, else the output slot.
+  const std::string varName = variable_.empty() ? out.varnames()[0] : variable_;
 
   // Read y and H(x) for this variable
   std::vector<float> y, hofx;
@@ -156,8 +168,8 @@ void SigmaFromInnovations::compute(const ObsFilterData & in,
 // -----------------------------------------------------------------------------
 
 const ufo::Variables & SigmaFromInnovations::requiredVariables() const {
-  // We are using ObsFilterData::get with explicit Variable(group/name),
-  // so we don't need to register variables here.
+  // Empty unless the optional 'variable' was set (see constructor). When empty,
+  // use 'defer to post: true' in the filter to guarantee current-iterate H(x).
   return requiredVars_;
 }
 
