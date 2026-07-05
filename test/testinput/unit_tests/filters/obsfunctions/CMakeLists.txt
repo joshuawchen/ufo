@@ -1056,3 +1056,45 @@ ufo_add_test( NAME    qc_velocitycheck
               LABELS  filters obsfunctions
               WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../../../../ )
 #
+
+# --- SigmaFromInnovations self-contained functional test ---------------------
+# Obs file + YAML are generated at build time (deterministic, fixed seed) by
+# gen_sigmafrominnovations_testdata.py, then checked by test_ObsFunction.x
+# against an independent oracle stored as TestReference. Skipped gracefully if
+# the build python lacks numpy + (netCDF4 or h5py).
+if(NOT Python3_EXECUTABLE)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+endif()
+set(_sigma_test_ok FALSE)
+if(Python3_EXECUTABLE)
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c
+      "import importlib.util as u, numpy; import sys; sys.exit(0 if (u.find_spec('netCDF4') or u.find_spec('h5py')) else 1)"
+    RESULT_VARIABLE _sigma_rc OUTPUT_QUIET ERROR_QUIET)
+  if(_sigma_rc EQUAL 0)
+    set(_sigma_test_ok TRUE)
+  endif()
+endif()
+if(_sigma_test_ok)
+  add_custom_command(
+    OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/function_sigmafrominnovations.yaml
+            ${CMAKE_CURRENT_BINARY_DIR}/sigmafrominnovations_obs.nc4
+    COMMAND ${CMAKE_COMMAND} -E env
+              OUTDIR=${CMAKE_CURRENT_BINARY_DIR} SEED=12345
+              ${Python3_EXECUTABLE}
+              ${CMAKE_CURRENT_SOURCE_DIR}/gen_sigmafrominnovations_testdata.py
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_sigmafrominnovations_testdata.py
+    COMMENT "Generating SigmaFromInnovations test data")
+  add_custom_target(sigmafrominnovations_testdata ALL
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/sigmafrominnovations_obs.nc4)
+  ufo_add_test( NAME    function_sigmafrominnovations
+                ECBUILD
+                COMMAND ${CMAKE_BINARY_DIR}/bin/test_ObsFunction.x
+                ARGS    "${CMAKE_CURRENT_BINARY_DIR}/function_sigmafrominnovations.yaml"
+                MPI     1
+                LIBS    ufo
+                LABELS  filters obsfunctions
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../../../../ )
+else()
+  message(STATUS "SigmaFromInnovations ctest skipped: needs python numpy + netCDF4 or h5py")
+endif()
